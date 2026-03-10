@@ -1,0 +1,121 @@
+name: Build and Release ESP8266 Firmware
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SKETCH_NAME: Esp8266extender.ino
+  BUILD_DIR: build
+  ARTIFACT_NAME: esp8266-firmware
+  FQBN: esp8266:esp8266:nodemcuv2
+  ESP8266_CORE_URL: https://arduino.esp8266.com/stable/package_esp8266com_index.json
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      bin_name: ${{ steps.meta.outputs.bin_name }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set build metadata
+        id: meta
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION="main-${GITHUB_SHA::7}"
+          fi
+
+          BIN_NAME="Esp8266extender-${VERSION}.bin"
+
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "bin_name=${BIN_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Install Arduino CLI
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+          sudo mv bin/arduino-cli /usr/local/bin/
+          arduino-cli version
+
+      - name: Update board index
+        run: |
+          arduino-cli core update-index --additional-urls "${ESP8266_CORE_URL}"
+
+      - name: Install ESP8266 core
+        run: |
+          arduino-cli core install esp8266:esp8266 --additional-urls "${ESP8266_CORE_URL}"
+
+      - name: Install libraries
+        run: |
+          arduino-cli lib install "ESPAsyncTCP"
+          arduino-cli lib install "ESP Async WebServer"
+          arduino-cli lib install "ArduinoJson@6.21.5"
+
+      - name: Prepare sketch
+        run: |
+          mkdir -p sketch
+          cp "${SKETCH_NAME}" sketch/sketch.ino
+
+      - name: Compile firmware
+        run: |
+          mkdir -p "${BUILD_DIR}"
+          arduino-cli compile \
+            --fqbn "${FQBN}" \
+            --output-dir "${BUILD_DIR}" \
+            ./sketch
+
+      - name: Show build files
+        run: |
+          ls -R "${BUILD_DIR}"
+
+      - name: Rename firmware bin
+        run: |
+          BIN_FILE=$(find "${BUILD_DIR}" -maxdepth 1 -type f -name "*.bin" | head -n 1)
+          if [ -z "$BIN_FILE" ]; then
+            echo "No .bin file found!"
+            exit 1
+          fi
+          cp "$BIN_FILE" "${BUILD_DIR}/${{ steps.meta.outputs.bin_name }}"
+          echo "Final BIN: ${BUILD_DIR}/${{ steps.meta.outputs.bin_name }}"
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}-${{ steps.meta.outputs.version }}
+          path: |
+            ${{ env.BUILD_DIR }}/${{ steps.meta.outputs.bin_name }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download firmware artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}-${{ needs.build.outputs.version }}
+          path: release-files
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Firmware ${{ needs.build.outputs.version }}
+          tag_name: ${{ needs.build.outputs.version }}
+          files: |
+            release-files/${{ needs.build.outputs.bin_name }}
+          generate_release_notes: true
