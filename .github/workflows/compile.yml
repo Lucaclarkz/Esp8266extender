@@ -27,8 +27,10 @@ jobs:
 
       - name: Compile Sketch
         run: |
-          # လက်ရှိ folder ထဲက .ino ဖိုင်မှန်သမျှကို ရှာပြီး compile လုပ်ခိုင်းတာပါ
-          arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 --output-dir ./build ./*.ino
+          # လက်ရှိ path အောက်က ဘယ်နေရာမှာမဆိုရှိတဲ့ .ino ဖိုင်ကို ရှာခိုင်းတာပါ
+          SKETCH_PATH=$(find . -name "*.ino" | head -n 1)
+          echo "Compiling sketch at: $SKETCH_PATH"
+          arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 --output-dir ./build "$SKETCH_PATH"
 
       - name: Upload Binary
         uses: actions/upload-artifact@v4
