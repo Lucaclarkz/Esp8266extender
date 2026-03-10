@@ -5,6 +5,9 @@
 #include <FS.h>
 #include <LittleFS.h>
 
+#define NAPT 1000
+#define NAPT_PORT 10
+
 extern "C" {
 #include "user_interface.h"
 #include "wpa2_enterprise.h"
@@ -14,7 +17,7 @@ extern "C" {
 AsyncWebServer server(80);
 
 unsigned long previousMillis = 0;
-long delay_time = 0;
+long delay_time = 500; 
 int ledState = LOW;
 
 class wifi_ext {
@@ -29,8 +32,12 @@ public:
             String network_html = "";
             int n = WiFi.scanComplete();
 
+            // ChatGPT အကြံပြုချက် - Scanning status ပြခြင်း
             if (n == -2) {
                 WiFi.scanNetworks(true);
+                network_html = "<p style='color:blue;'>Scanning WiFi... refresh in a few seconds.</p>";
+            } else if (n == 0) {
+                network_html = "<p style='color:red;'>No WiFi found. Refresh again.</p>";
             } else if (n > 0) {
                 for (int i = 0; i < n; ++i) {
                     String router = WiFi.SSID(i);
@@ -39,55 +46,38 @@ public:
                 WiFi.scanDelete();
             }
 
-            String html = "<html><head><style>body{font-family:sans-serif;padding:20px;} input{margin-bottom:10px;}</style></head><body>";
-            html += "<h1>WiFi Extender (Enterprise Support)</h1>";
-            html += "<form action=\"/credentials\">";
-            html += "<h3>Select Network:</h3>" + network_html;
-            html += "<br><input type=\"text\" name=\"user\" placeholder=\"Username (For Myanmar Net)\"><br>";
-            html += "<input type=\"password\" name=\"pass\" placeholder=\"Password\" required><br>";
-            html += "<input type=\"text\" name=\"ap\" placeholder=\"New Hotspot Name\" required><br>";
-            html += "<input type=\"submit\" value=\"Save and Restart\">";
-            html += "</form></body></html>";
-
+            String html = "<html><head><title>Pius Extender</title><style>body{font-family:sans-serif;padding:20px;} input{margin-bottom:15px; width:100%;}</style></head><body>";
+            html += "<h1>WiFi Extender Config</h1><form action=\"/credentials\">";
+            html += "<h3>1. Select WiFi:</h3>" + network_html;
+            html += "<h3>2. Enterprise User (Identity):</h3><input type=\"text\" name=\"user\">";
+            html += "<h3>3. WiFi Password:</h3><input type=\"password\" name=\"pass\" required>";
+            html += "<h3>4. New AP Name:</h3><input type=\"text\" name=\"ap\">";
+            html += "<input type=\"submit\" value=\"Save and Restart\"></form></body></html>";
             request->send(200, "text/html", html);
         });
 
         server.on("/credentials", HTTP_GET, [](AsyncWebServerRequest *request) {
-            String ssid = request->hasParam("ssid") ? request->getParam("ssid")->value() : "";
-            String user = request->hasParam("user") ? request->getParam("user")->value() : "";
-            String pass = request->hasParam("pass") ? request->getParam("pass")->value() : "";
-            String ap   = request->hasParam("ap")   ? request->getParam("ap")->value()   : "";
-
             File file = LittleFS.open("/config.txt", "w");
             if (file) {
-                file.println(ssid);
-                file.println(pass);
-                file.println(ap);
-                file.println(user);
+                file.println(request->hasParam("ssid") ? request->getParam("ssid")->value() : "");
+                file.println(request->hasParam("pass") ? request->getParam("pass")->value() : "");
+                file.println(request->hasParam("ap") ? request->getParam("ap")->value() : "");
+                file.println(request->hasParam("user") ? request->getParam("user")->value() : "");
                 file.close();
             }
-
-            request->send(200, "text/plain", "Config Saved. Restarting...");
-            delay(2000);
-            ESP.restart();
+            request->send(200, "text/plain", "Saved. Restarting...");
+            delay(2000); ESP.restart();
         });
     }
 
     bool load_credentials() {
         File file = LittleFS.open("/config.txt", "r");
         if (!file) return false;
-
-        ssid = file.readStringUntil('\n');
-        pass = file.readStringUntil('\n');
-        ap   = file.readStringUntil('\n');
-        user = file.readStringUntil('\n');
+        ssid = file.readStringUntil('\n'); ssid.trim();
+        pass = file.readStringUntil('\n'); pass.trim();
+        ap = file.readStringUntil('\n'); ap.trim();
+        user = file.readStringUntil('\n'); user.trim();
         file.close();
-
-        ssid.trim();
-        pass.trim();
-        ap.trim();
-        user.trim();
-
         return ssid.length() > 0;
     }
 };
@@ -98,58 +88,63 @@ void setup() {
     Serial.begin(115200);
     pinMode(LED_BUILTIN, OUTPUT);
 
+    // ChatGPT အကြံပြုချက် - LittleFS mount စစ်ဆေးခြင်း
     if (!LittleFS.begin()) {
         Serial.println("LittleFS mount failed");
+        return; 
     }
 
-    bool hasConfig = my_wifi.load_credentials();
-
-    if (!hasConfig) {
+    if (!my_wifi.load_credentials()) {
         WiFi.mode(WIFI_AP);
         WiFi.softAP("Pius_Extender_Setup");
         my_wifi.create_server();
         server.begin();
         delay_time = 1000;
     } else {
-        String ssid = my_wifi.ssid;
-        String pass = my_wifi.pass;
-        String ap   = my_wifi.ap;
-        String user = my_wifi.user;
-
         WiFi.mode(WIFI_AP_STA);
 
-        if (user != "") {
+        if (my_wifi.user != "") {
+            wifi_station_disconnect();
             struct station_config sta_conf;
-            wifi_station_get_config(&sta_conf);
-            os_memset(sta_conf.ssid, 0, 32);
-            os_memcpy(sta_conf.ssid, ssid.c_str(), ssid.length());
-            wifi_station_set_config(&sta_conf);
+            memset(&sta_conf, 0, sizeof(sta_conf)); 
 
+            size_t len = my_wifi.ssid.length();
+            if (len > 31) len = 31;
+            memcpy(sta_conf.ssid, my_wifi.ssid.c_str(), len);
+            sta_conf.ssid[len] = 0;
+            
+            wifi_station_set_config(&sta_conf);
             wifi_station_set_wpa2_enterprise_auth(1);
-            wifi_station_set_enterprise_username((uint8 *)user.c_str(), user.length());
-            wifi_station_set_enterprise_password((uint8 *)pass.c_str(), pass.length());
+            wifi_station_set_enterprise_username((uint8 *)my_wifi.user.c_str(), my_wifi.user.length());
+            wifi_station_set_enterprise_password((uint8 *)my_wifi.pass.c_str(), my_wifi.pass.length());
             wifi_station_connect();
         } else {
-            WiFi.begin(ssid.c_str(), pass.c_str());
+            WiFi.begin(my_wifi.ssid.c_str(), my_wifi.pass.c_str());
         }
 
-        while (WiFi.status() != WL_CONNECTED) {
-            delay(500);
-            Serial.print(".");
+        int count = 0;
+        while (WiFi.status() != WL_CONNECTED && count < 30) {
+            delay(500); Serial.print("."); count++;
         }
 
-        ip_napt_init(1000, 10);
-        ip_napt_enable_no(SOFTAP_IF, 1);
-
-        if (ap == "") ap = "Pius_Extender";
-        WiFi.softAP(ap.c_str(), pass.c_str());
-
-        delay_time = 200;
+        if (WiFi.status() == WL_CONNECTED) {
+            ip_napt_init(NAPT, NAPT_PORT);
+            ip_napt_enable_no(SOFTAP_IF, 1);
+            
+            String ap_name = (my_wifi.ap.length() > 0) ? my_wifi.ap : "Pius_Extender";
+            String ap_pass = (my_wifi.pass.length() >= 8) ? my_wifi.pass : "12345678";
+            WiFi.softAP(ap_name.c_str(), ap_pass.c_str());
+            
+            delay_time = 200;
+        } else {
+            LittleFS.remove("/config.txt");
+            ESP.restart();
+        }
     }
 }
 
 void loop() {
-    if (millis() - previousMillis >= delay_time) {
+    if (millis() - previousMillis >= (unsigned long)delay_time) {
         previousMillis = millis();
         ledState = !ledState;
         digitalWrite(LED_BUILTIN, ledState);
