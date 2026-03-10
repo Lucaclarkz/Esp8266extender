@@ -9,6 +9,7 @@
 extern "C" {
 #include "user_interface.h"
 #include "wpa2_enterprise.h"
+#include "lwip/napt.h"
 }
 
 AsyncWebServer server(80);
@@ -25,8 +26,10 @@ public:
         server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
             String network_html = "";
             int n = WiFi.scanComplete();
-            if (n == -2) { WiFi.scanNetworks(true); }
-            else if (n) {
+
+            if (n == -2) {
+                WiFi.scanNetworks(true);
+            } else if (n > 0) {
                 for (int i = 0; i < n; ++i) {
                     String router = WiFi.SSID(i);
                     network_html += "<input type=\"radio\" name=\"ssid\" value=\"" + router + "\" required><label>" + router + "</label><br>";
@@ -43,6 +46,7 @@ public:
             html += "<input type=\"text\" name=\"ap\" placeholder=\"New Hotspot Name\" required><br>";
             html += "<input type=\"submit\" value=\"Save and Restart\">";
             html += "</form></body></html>";
+
             request->send(200, "text/html", html);
         });
 
@@ -50,13 +54,17 @@ public:
             if (request->hasParam("ssid")) Config["ssid"] = request->getParam("ssid")->value();
             if (request->hasParam("user")) Config["user"] = request->getParam("user")->value();
             if (request->hasParam("pass")) Config["pass"] = request->getParam("pass")->value();
-            if (request->hasParam("ap")) Config["ap"] = request->getParam("ap")->value();
+            if (request->hasParam("ap"))   Config["ap"]   = request->getParam("ap")->value();
 
             String output;
             serializeJson(Config, output);
+
             File file = LittleFS.open("/config.json", "w");
-            file.print(output);
-            file.close();
+            if (file) {
+                file.print(output);
+                file.close();
+            }
+
             request->send(200, "text/plain", "Config Saved. Restarting...");
             delay(2000);
             ESP.restart();
@@ -66,10 +74,20 @@ public:
     String get_credentials(int a) {
         File file = LittleFS.open("/config.json", "r");
         if (!file) return "null";
+
         String content = file.readString();
-        deserializeJson(Config, content);
         file.close();
-        String creds[] = {Config["ssid"], Config["pass"], Config["ap"], Config["user"]};
+
+        DeserializationError err = deserializeJson(Config, content);
+        if (err) return "null";
+
+        String creds[] = {
+            Config["ssid"] | "",
+            Config["pass"] | "",
+            Config["ap"]   | "",
+            Config["user"] | ""
+        };
+
         return creds[a];
     }
 };
@@ -79,47 +97,56 @@ wifi_ext my_wifi;
 void setup() {
     Serial.begin(115200);
     pinMode(LED_BUILTIN, OUTPUT);
-    LittleFS.begin();
+
+    if (!LittleFS.begin()) {
+        Serial.println("LittleFS mount failed");
+    }
 
     String ssid = my_wifi.get_credentials(0);
     String pass = my_wifi.get_credentials(1);
-    String ap = my_wifi.get_credentials(2);
+    String ap   = my_wifi.get_credentials(2);
     String user = my_wifi.get_credentials(3);
 
-    if (ssid == "null") {
+    if (ssid == "null" || ssid == "") {
+        WiFi.mode(WIFI_AP);
         WiFi.softAP("Pius_Extender_Setup");
         my_wifi.create_server();
         server.begin();
         delay_time = 1000;
     } else {
-        WiFi.mode(WIFI_STA);
+        WiFi.mode(WIFI_AP_STA);
+
         if (user != "" && user != "null") {
-            // Enterprise Connection Logic
             struct station_config sta_conf;
             wifi_station_get_config(&sta_conf);
             os_memset(sta_conf.ssid, 0, 32);
             os_memcpy(sta_conf.ssid, ssid.c_str(), ssid.length());
             wifi_station_set_config(&sta_conf);
+
             wifi_station_set_wpa2_enterprise_auth(1);
             wifi_station_set_enterprise_username((uint8 *)user.c_str(), user.length());
             wifi_station_set_enterprise_password((uint8 *)pass.c_str(), pass.length());
             wifi_station_connect();
         } else {
-            WiFi.begin(ssid, pass);
+            WiFi.begin(ssid.c_str(), pass.c_str());
         }
 
-        while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
-        
-        // NAPT Enable
+        while (WiFi.status() != WL_CONNECTED) {
+            delay(500);
+            Serial.print(".");
+        }
+
         ip_napt_init(1000, 10);
         ip_napt_enable_no(SOFTAP_IF, 1);
-        WiFi.softAP(ap, pass);
+
+        if (ap == "" || ap == "null") ap = "Pius_Extender";
+        WiFi.softAP(ap.c_str(), pass.c_str());
+
         delay_time = 200;
     }
 }
 
 void loop() {
-    // Led blink logic
     if (millis() - previousMillis >= delay_time) {
         previousMillis = millis();
         ledState = !ledState;
